@@ -1,4 +1,4 @@
-from uuid import UUID
+from pathlib import Path
 
 from fastapi import APIRouter,HTTPException,Response,UploadFile
 from fastapi.responses import FileResponse
@@ -6,43 +6,28 @@ from fastapi.responses import FileResponse
 from app.modules.rag import service
 
 router = APIRouter(
-    prefix="/knowledge",
+    prefix="/rag",
     tags=["知识库管理"],
 )
 
+PDF_DIR = Path(__file__).resolve().parents[3] / "data" / "pdfs"
 
 @router.post("/documents", status_code=201)
-def upload_pdf(file: UploadFile):
-    try:
-        return service.upload_pdf(
-            filename=file.filename or "document.pdf",
-            source=file.file,
-        )
-    finally:
-        file.file.close()
-
+def insert_document(file: UploadFile):
+    service.insert_document(file.file,file.filename)
 
 @router.get("/documents")
-def list_pdfs():
-    return service.list_pdfs()
-
+def list_document():
+    return service.list_document()
 
 @router.get("/documents/{document_id}/file")
-def read_pdf(document_id: UUID):
-    document, path = service.get_pdf(document_id.hex)
-
-    if document is None or not path.is_file():
-        raise HTTPException(404, "PDF 不存在")
-
+def get_document(document_id):
+    path=PDF_DIR/f"{document_id}.pdf"
     return FileResponse(
         path=path,
         media_type="application/pdf",
-        filename=document["filename"],
-        content_disposition_type="inline",
     )
 
-
 @router.delete("/documents/{document_id}", status_code=204)
-def delete_pdf(document_id: UUID):
-    service.delete_pdf(document_id.hex)
-    return Response(status_code=204)
+def delete_pdf(document_id):
+    service.delete_document(document_id=document_id)
