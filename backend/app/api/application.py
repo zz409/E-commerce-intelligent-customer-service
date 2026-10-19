@@ -1,7 +1,12 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
-from app.api.routes.conversations import router
+from app.api.routes.conversations import router as conversations_router
 
-app=FastAPI(title="电商智能客服系统")
+from backend.app.api.routes.rag import router as knowledge_router
 
-app.include_router(router,prefix="/api")
+app = FastAPI()
+
+app.include_router(conversations_router, prefix="/api")
+app.include_router(knowledge_router, prefix="/api")

@@ -2,3 +2,7 @@ backend/data/*.sqlite
 backend/data/*.sqlite-wal
 backend/data/*.sqlite-shm
 backend/.env
+backend/data/pdfs/
+backend/data/chroma_mvp/
+backend/data/graph_mvp.lbdb*
+backend/data/knowledge_mvp.sqlite*
