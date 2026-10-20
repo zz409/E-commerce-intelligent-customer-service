@@ -2,6 +2,7 @@ import os
 import sqlite3
 import json
 import logging
+import sys
 
 from contextlib import closing
 from pathlib import Path
@@ -10,12 +11,21 @@ from dotenv import load_dotenv
 
 from langchain.chat_models import init_chat_model
 from langchain.agents import create_agent
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 logger=logging.getLogger(__name__)
 
 BACKEND_DIR=Path(__file__).resolve().parents[3]
+
+client=MultiServerMCPClient({
+    "rag":{
+        "transport":"stdio",
+        "command":sys.executable,
+        "args":["-m","app.mcp.rag_server"],
+        "cwd":str(BACKEND_DIR)
+    }
+})
 
 DATA_DIR=BACKEND_DIR/"data"
 DATA_DIR.mkdir(parents=True,exist_ok=True)
@@ -66,22 +76,23 @@ def send_message(conversation_id:str,content:str):
         base_url="https://maas.qianwenaiapi.com/compatible-mode/v1",
     )
 
-    def generate():
+    async def generate():
         try:
-            with SqliteSaver.from_conn_string(
+            tools=await client.get_tools()
+
+            async with AsyncSqliteSaver.from_conn_string(
                 str(DATABASE_PATH)
             ) as checkpointer:
                 agent=create_agent(
                     model=model,
-                    tools=[],
+                    tools=tools,
                     system_prompt=(
                         "你是电商客服助手，请使用中文回答。"
-                        "尚未接入真实业务接口，不要编造订单或商品数据。"
                     ),
                     checkpointer=checkpointer,
                 )
 
-                for chunk,metadata in agent.stream(
+                async for chunk,metadata in agent.astream(
                     {
                         "messages":[
                             {"role":"user","content":content}
