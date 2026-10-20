@@ -170,3 +170,87 @@ def delete_document(document_id):
 
     finally:
         db.close()
+
+def search_chunk(embedding,limit=20):
+    conn=sqlite3.connect(SQLITE_PATH)
+    conn.row_factory=sqlite3.Row
+
+    try:
+        conn.enable_load_extension(True)
+        try:
+            sqlite_vec.load(conn)
+        finally:
+            conn.enable_load_extension(False)
+
+        rows=conn.execute(
+            """
+            SELECT
+                chunk_id,
+                document_id,
+                page,
+                content,
+                distance
+            FROM chunks
+            WHERE embedding MATCH ?
+              AND k=?
+            ORDER BY distance
+            """,
+            (
+                sqlite_vec.serialize_float32(embedding),
+                limit,
+            ),
+        ).fetchall()
+
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+def search_graph(entity_names,limit=20):
+
+
+    keywords = list({
+        name.strip().lower()
+        for name in (entity_names or [])
+        if name.strip()
+    })
+    if not keywords or limit <= 0:
+        return []
+
+    db = ladybug.Database(str(LDBD_PATH))
+
+    try:
+        conn = ladybug.Connection(db)
+
+        try:
+            result = conn.execute(
+                """
+                MATCH p = (a:Entity)-[:Fact*1..2]-(b:Entity)
+                WHERE any(keyword IN $keywords
+                          WHERE lower(a.name) CONTAINS keyword)
+                RETURN
+                    nodes(p) AS entities,
+                    rels(p) AS relationships
+                LIMIT $limit
+                """,
+                {
+                    "keywords": keywords,
+                    "limit": limit,
+                },
+            )
+
+            try:
+                columns = result.get_column_names()
+                rows = []
+
+                while result.has_next():
+                    rows.append(
+                        dict(zip(columns, result.get_next()))
+                    )
+
+                return rows
+            finally:
+                result.close()
+        finally:
+            conn.close()
+    finally:
+        db.close()

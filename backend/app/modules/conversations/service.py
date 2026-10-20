@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 from langchain.agents import create_agent
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langchain_mcp_adapters.client import MultiServerMCPClient
 
 logger=logging.getLogger(__name__)
 

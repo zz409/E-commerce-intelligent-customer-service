@@ -1,91 +1,97 @@
-from uuid import uuid4
+import os
+from dotenv import load_dotenv
 
-from app.db.rag_db import (
-    insert_document,
-    insert_chunks,
-    insert_triples,
-    list_documents,
-)
+from openai import OpenAI
+from mcp.server.fastmcp import FastMCP
+from app.db import rag_db
+from langchain.embeddings import init_embeddings
+from langchain_neo4j import LLMGraphTransformer
+from langchain.chat_models import init_chat_model
+from langchain_core.documents import Document
 
+load_dotenv()
 
-def main():
-    # 每次测试生成不同 ID，避免主键冲突
-    prefix = uuid4().hex
+mcp=FastMCP("知识库检索服务")
 
-    document_id_1 = f"{prefix}_doc1"
-    document_id_2 = f"{prefix}_doc2"
+@mcp.tool()
+def rag(text)->list[dict]:
+    """RAG检索，返回相关片段"""
 
-    chunk_id_1 = f"{document_id_1}:0"
-    chunk_id_2 = f"{document_id_2}:0"
+    results=[]
 
-    # 1. 插入两条文档记录
-    insert_document(document_id_1, "商品A说明书.pdf")
-    insert_document(document_id_2, "商品B说明书.pdf")
-
-    # 2. 插入两个文本块及向量
-    # 仅用于验证存储，不是真实模型生成的语义向量
-    embedding_1 = [1.0] + [0.0] * 1023
-    embedding_2 = [0.0, 1.0] + [0.0] * 1022
-
-    insert_chunks(
-        chunk_id=chunk_id_1,
-        embedding=embedding_1,
-        document_id=document_id_1,
-        chunk_index=0,
-        page=1,
-        content="商品A的保修期限为一年。",
+    client = OpenAI(
+        api_key=os.environ["RERANK_MODEL_API_KEY"],
+        base_url=os.environ["RERANK_MODEL_BASE_URL"],
     )
 
-    insert_chunks(
-        chunk_id=chunk_id_2,
-        embedding=embedding_2,
-        document_id=document_id_2,
-        chunk_index=0,
-        page=2,
-        content="商品B的生产商是公司B。",
+    embedding_model=init_embeddings(
+        "openai:qwen3.7-text-embedding",
+        api_key=os.getenv("EMBEDDING_MODEL_API_KEY"),
+        base_url=os.getenv("EMBEDDING_MODEL_BASE_URL"),
+        check_embedding_ctx_length=False,
     )
 
-    # 3. 插入两条关系，同时创建对应实体节点
-    insert_triples(
-        document_id=document_id_1,
-        chunk_id=chunk_id_1,
-        page=1,
-        triples=[
-            {
-                "subject_id": f"{document_id_1}:商品A",
-                "subject": "商品A",
-                "object_id": f"{document_id_1}:一年",
-                "object": "一年",
-                "predicate": "保修期限",
-                "evidence": "商品A的保修期限为一年。",
-            }
-        ],
+    transformer_model=init_chat_model(
+        model_provider="openai",
+        model="qwen3.8-max",
+        api_key=os.getenv("QWEN_API_KEY"),
+        base_url="https://maas.qianwenaiapi.com/compatible-mode/v1",
     )
 
-    insert_triples(
-        document_id=document_id_2,
-        chunk_id=chunk_id_2,
-        page=2,
-        triples=[
-            {
-                "subject_id": f"{document_id_2}:商品B",
-                "subject": "商品B",
-                "object_id": f"{document_id_2}:公司B",
-                "object": "公司B",
-                "predicate": "生产商",
-                "evidence": "商品B的生产商是公司B。",
-            }
-        ],
+    transformer=LLMGraphTransformer(
+        llm=transformer_model,
     )
 
-    print("插入完成，本次文档 ID：")
-    print(document_id_1)
-    print(document_id_2)
+    vector=embedding_model.embed_query(text=text)
 
-    print("\n全部文档：")
-    for row in list_documents():
-        print(row)
+    graphs=transformer.convert_to_graph_documents([
+        Document(
+            page_content=text,
+        )
+    ])
 
+    entity_names=list({
+        str(node.id)
+        for graph in graphs
+        for node in graph.nodes
+    })
 
-if __name__ == "__main__":
-    main()
+    vector_results = rag_db.search_chunk(vector)
+
+    response=client.post(
+        "/reranks",
+        body={
+            "model":"qwen3-rerank",
+            "query":text,
+            "documents":[
+                row["content"]
+                for row in vector_results
+            ],
+            "top_n":5,
+        },
+        cast_to=object,
+    )
+
+    for result in response["results"]:
+        chunk=vector_results[result["index"]]
+
+        results.append({
+            "content":chunk["content"],
+            "document_id":chunk["document_id"],
+            "page":chunk["page"],
+        })
+
+    graph_results = rag_db.search_graph(entity_names=entity_names)
+
+    for graph_result in graph_results:
+        for relationship in graph_result["relationships"]:
+            results.append({
+                "content":relationship["evidence"],
+                "document_id":relationship["document_id"],
+                "page":relationship["page"],
+            })
+        
+    return results
+
+if __name__=="__main__":
+    mcp.run(transport="stdio")
