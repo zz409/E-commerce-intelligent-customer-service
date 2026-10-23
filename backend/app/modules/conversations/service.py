@@ -13,6 +13,9 @@ from langchain.chat_models import init_chat_model
 from langchain.agents import create_agent
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain.agents.middleware import SummarizationMiddleware
+from langchain_core.messages import AIMessage
+from app.db import conversation_db
 
 logger=logging.getLogger(__name__)
 
@@ -34,46 +37,28 @@ DATABASE_PATH=DATA_DIR/"checkpoints.sqlite"
 
 load_dotenv()
 
+
 class ConversationNotFoundError(Exception):
     pass
 
-def initialize_database()->None:
-    with closing(sqlite3.connect(DATABASE_PATH)) as conn, conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS conversations(
-                id TEXT PRIMARY KEY,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-
-def create_conversation()->str:
-    initialize_database()
+def create_conversation(user_id:str)->str:
     conversation_id=str(uuid4())
-    with closing(sqlite3.connect(DATABASE_PATH)) as conn, conn:
-        conn.execute(
-            "INSERT INTO conversations (id) VALUES (?)",
-            (conversation_id,),
-        )
-
+    conversation_db.create_conversation(user_id,conversation_id)
     return conversation_id
-
+    
 def send_message(conversation_id:str,content:str):
-    initialize_database()
-    with closing(sqlite3.connect(DATABASE_PATH)) as conn, conn:
-        exists=conn.execute(
-            "SELECT 1 FROM conversations WHERE id = ?",
-            (conversation_id,),
-        ).fetchone()
-
-    if not exists:
-        raise ConversationNotFoundError()
 
     model=init_chat_model(
         model="qwen3.8-max",
         model_provider="openai",
         api_key=os.environ["QWEN_API_KEY"],
         base_url="https://maas.qianwenaiapi.com/compatible-mode/v1",
+    )
+
+    conversation_db.insert_message(
+        conversation_id=conversation_id,
+        content=content,
+        role="user"
     )
 
     async def generate():
@@ -90,7 +75,20 @@ def send_message(conversation_id:str,content:str):
                         "你是电商客服助手，请使用中文回答。"
                     ),
                     checkpointer=checkpointer,
+                    middleware=[
+                        SummarizationMiddleware(
+                            model=model,
+                            trigger=("tokens",60000),
+                            keep=("messages",10)
+                        )
+                    ]
                 )
+
+                config={
+                    "configurable":{
+                        "thread_id":conversation_id
+                    }
+                }
 
                 async for chunk,metadata in agent.astream(
                     {
@@ -98,11 +96,7 @@ def send_message(conversation_id:str,content:str):
                             {"role":"user","content":content}
                         ]
                     },
-                    config={
-                        "configurable":{
-                            "thread_id":conversation_id
-                        }
-                    },
+                    config=config,
                     stream_mode="messages"
                 ):
                     if metadata.get("langgraph_node") != "model":
@@ -118,6 +112,29 @@ def send_message(conversation_id:str,content:str):
                                 )
                                 yield f"event:delta\ndata:{data}\n\n"
 
+                state=await agent.aget_state(config)
+                final_message=next(
+                    (
+                        message
+                        for message in reversed(state.values.get("messages",[]))
+                        if isinstance(message,AIMessage)
+                        and not message.tool_calls
+                    ),
+                    None,
+                )
+
+                final_content="".join(
+                    block.get("text","")
+                    for block in final_message.content_blocks
+                    if block.get("type")=="text"
+                )
+
+                conversation_db.insert_message(
+                    conversation_id,
+                    "assistant",
+                    final_content,
+                )
+
             yield 'event:done\ndata: {}\n\n'
 
         except Exception:
@@ -129,3 +146,12 @@ def send_message(conversation_id:str,content:str):
             yield f"event: error\ndata: {data}\n\n"
 
     return generate()
+
+def get_conversation(conversation_id):
+    return conversation_db.get_conversaiton(conversation_id)
+
+def get_conversations(user_id):
+    return conversation_db.get_conversations(user_id)
+
+def delete_conversation(conversation_id):
+    conversation_db.delete_conversaion(conversation_id)

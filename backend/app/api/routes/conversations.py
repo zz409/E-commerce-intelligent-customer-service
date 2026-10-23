@@ -4,7 +4,7 @@ from fastapi import APIRouter,HTTPException
 from pydantic import BaseModel,Field,field_validator
 from fastapi.responses import StreamingResponse
 
-from app.modules.conversations.service import ConversationNotFoundError,create_conversation,send_message
+from app.modules.conversations import service
 
 logger=logging.getLogger(__name__)
 
@@ -31,10 +31,17 @@ class MessageResponse(BaseModel):
     conversation_id:str
     reply:str
 
+class CreateConversationRequest(BaseModel):
+    user_id:str
+
 @router.post("",status_code=201,response_model=ConversationResponse)
-def create():
+def create(
+    body:CreateConversationRequest
+):
     return {
-        "conversation_id":create_conversation()
+        "conversation_id":service.create_conversation(
+            user_id=body.user_id,
+        )
     }
 
 @router.post("/{conversation_id}/messages")
@@ -43,11 +50,11 @@ def send(
     body:MessageRequest
 ):
     try:
-        events=send_message(
+        events=service.send_message(
             conversation_id,
             body.content
         )
-    except ConversationNotFoundError:
+    except service.ConversationNotFoundError:
         raise HTTPException(
             status_code=404,
             detail="会话不存在",
@@ -67,3 +74,22 @@ def send(
             "X-Accel-Buffering":"no",
         },
     )
+
+
+@router.get("/{conversation_id}/messages")
+def get_conversation(
+    conversation_id:str
+):
+    return service.get_conversation(conversation_id)
+
+@router.get("",response_model=list[str])
+def get_conversation(
+    user_id:str
+)->list[str]:
+    return service.get_conversations(user_id)
+
+@router.delete("/{conversation_id}")
+def delete_conversation(
+    conversation_id:str
+):
+    service.delete_conversation(conversation_id)
